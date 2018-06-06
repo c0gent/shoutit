@@ -11,6 +11,7 @@ extern crate toml;
 extern crate serde_derive;
 #[macro_use]
 extern crate lazy_static;
+extern crate serde_json;
 
 use std::fs::{OpenOptions, File, DirBuilder};
 use std::str;
@@ -30,6 +31,12 @@ struct Config {
     app_id: String,
     rest_api_key: String,
 }
+
+#[derive(Debug, Deserialize)]
+struct Message {
+    message: String,
+}
+
 
 fn parse_config() -> Config {
     let mut config_string = String::new();
@@ -84,10 +91,14 @@ fn shout(req: Request<Body>) -> BoxFut {
 
             let send = message_chunks.and_then(|message_chunks| {
                 let message_bytes: Vec<u8> = message_chunks.into_iter().flat_map(|c| c.into_bytes()).collect();
-                let message = String::from_utf8(message_bytes).unwrap();                
+                // let message = String::from_utf8(message_bytes).unwrap();
+
+                let message: Message = serde_json::from_slice(&message_bytes).unwrap();
+
                 let json = format!("{{\"app_id\": \"{}\", \
                     \"contents\": {{\"en\": \"{}\"}}, \
-                    \"included_segments\": [\"All\"]}}", CONFIG.app_id, message);
+                    \"included_segments\": [\"All\"]}}", CONFIG.app_id, message.message);
+
                 let uri: hyper::Uri = "https://onesignal.com/api/v1/notifications".parse().unwrap();
                 let mut req = Request::new(Body::from(json));
                 *req.method_mut() = Method::POST;
@@ -100,14 +111,13 @@ fn shout(req: Request<Body>) -> BoxFut {
                 let client = Client::builder()
                     .build::<_, hyper::Body>(https);
 
-                println!("Message: {}", message);
+                println!("\nMessage: {}", message.message);
 
                 client
                     .request(req)
-                    // And then, if we get a response back...
                     .and_then(|res| {
                         println!("Response: {}", res.status());
-                        println!("Headers: {:#?}\n", res.headers());
+                        println!("Headers: {:#?}", res.headers());
 
                         res.into_body().for_each(|chunk| {
                             io::stdout().write_all(&chunk)
@@ -129,7 +139,7 @@ fn shout(req: Request<Body>) -> BoxFut {
 fn main() {
     println!("ShoutIt server started.");
 
-    let addr = ([127, 0, 0, 1], 8080).into();
+    let addr = ([10, 0, 0, 101], 8080).into();
 
     let server = Server::bind(&addr)
         .serve(|| service_fn(shout))
