@@ -87,6 +87,7 @@ fn shout(req: Request<Body>) -> BoxFut {
 
         },
         (&Method::POST, "/shout") => {
+            *response.status_mut() = StatusCode::OK;
             let message_chunks = req.into_body().collect();
 
             let send = message_chunks.and_then(|message_chunks| {
@@ -117,11 +118,11 @@ fn shout(req: Request<Body>) -> BoxFut {
                     .request(req)
                     .and_then(|res| {
                         println!("Response: {}", res.status());
-                        println!("Headers: {:#?}", res.headers());
+                        // println!("Headers: {:#?}", res.headers());
 
                         res.into_body().for_each(|chunk| {
                             io::stdout().write_all(&chunk)
-                                .map_err(|e| panic!("example expects stdout is open, error={}", e))
+                                .map_err(|e| panic!("Example expects stdout is open, error: {}", e))
                         })
                     })
             });

@@ -18,7 +18,6 @@ import com.android.volley.Response;
 import com.android.volley.VolleyError;
 import com.android.volley.VolleyLog;
 import com.android.volley.toolbox.JsonObjectRequest;
-import com.android.volley.toolbox.StringRequest;
 import com.android.volley.toolbox.Volley;
 
 import org.json.JSONException;
@@ -39,18 +38,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     public void sendMessage(View view) {
-//        Intent intent = new Intent(this, BroadcastActivity.class);
-//        EditText editText = (EditText) findViewById(R.id.editText);
-//        String message = editText.getText().toString();
-//        intent.putExtra(EXTRA_MESSAGE, message);
-//        startActivity(intent);
-
         postShout();
     }
 
     private void postShout() {
-        String url =  "http://10.0.0.101:8080/shout";
-        Toast.makeText(MainActivity.this, "Posting message...", Toast.LENGTH_SHORT).show();
+//        String url =  "http://10.0.0.101:8080/shout";
+        String url =  "http://cogciprocate.com:8080/shout";
+//        Toast.makeText(MainActivity.this, "Posting message...", Toast.LENGTH_SHORT).show();
         JSONObject jsonBody = new JSONObject();
         try {
             jsonBody.put("message", editText.getText());
@@ -69,16 +63,21 @@ public class MainActivity extends AppCompatActivity {
 //                    } catch (JSONException e) {
 //                        e.printStackTrace();
 //                    }
-//                    String result = "Your message has been shouted!";
-//                    Toast.makeText(MainActivity.this, result, Toast.LENGTH_SHORT).show();
-                    String result = "The response is: " + response.toString();
-                    Toast.makeText(MainActivity.this, result, Toast.LENGTH_SHORT).show();
+                    String msg = "\"" + editText.getText() + "\" has been shouted!";
+                    Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
+
+                    String res = response.toString();
+                    if (res != null && res.isEmpty()) {
+                        String resp = "The response is: " + response.toString();
+                        Toast.makeText(MainActivity.this, resp, Toast.LENGTH_SHORT).show();
+                    }
                 }
             }, new Response.ErrorListener() {
                 @Override
                 public void onErrorResponse(VolleyError error) {
                     VolleyLog.e("Error: ", error.getMessage());
-                    Toast.makeText(MainActivity.this, error.getMessage(), Toast.LENGTH_LONG).show();
+//                    Toast.makeText(MainActivity.this, "Error: " +  error.getMessage(),
+//                            Toast.LENGTH_LONG).show();
                 }
             });
 
