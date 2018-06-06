@@ -1,0 +1,15 @@
+[package]
+name = "server"
+version = "0.1.0"
+authors = ["c0gent <nsan1129@gmail.com>"]
+
+[dependencies]
+hyper = "0.12"
+hyper-tls = "0.2"
+# http = "*"
+tokio = "0.1.5"
+futures = "0.1"
+toml = "0.4"
+serde = "1"
+serde_derive = "1"
+lazy_static = "*"

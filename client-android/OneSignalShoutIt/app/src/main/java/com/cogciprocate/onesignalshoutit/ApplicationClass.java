@@ -16,3 +16,4 @@ public class ApplicationClass extends Application {
             .init();
     }
 }
+
