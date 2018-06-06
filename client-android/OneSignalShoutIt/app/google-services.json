@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "624992156015",
+    "firebase_url": "https://onesignalshoutit.firebaseio.com",
+    "project_id": "onesignalshoutit",
+    "storage_bucket": "onesignalshoutit.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:624992156015:android:ab32a1cc410478fe",
+        "android_client_info": {
+          "package_name": "com.cogciprocate.onesignalshoutit"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "624992156015-i6u0p2l3vk73gu8v5vfmu65sekescdlb.apps.googleusercontent.com",
+          "client_type": 3
+        },
+        {
+          "client_id": "624992156015-i6u0p2l3vk73gu8v5vfmu65sekescdlb.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDapCz8h3mDbjKZMimmsMKTo1kfYA8wNjg"
+        }
+      ],
+      "services": {
+        "analytics_service": {
+          "status": 1
+        },
+        "appinvite_service": {
+          "status": 1,
+          "other_platform_oauth_client": []
+        },
+        "ads_service": {
+          "status": 2
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
