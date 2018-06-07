@@ -59,7 +59,8 @@ struct RequestBodyContents<'r> {
 struct RequestBody<'r> {
     app_id: &'r str,
     contents: RequestBodyContents<'r>,
-    included_segments: &'r str,
+    // included_segments: &'r str,
+    included_segments: &'r [&'r str],
 }
 
 /// Configuration errors.
@@ -82,8 +83,6 @@ impl std::fmt::Debug for ConfigError {
         std::fmt::Display::fmt(self, f)
     }
 }
-
-
 
 /// Parses or creates a configuration file at `$HOME/.cogciprocate`.
 ///
@@ -133,32 +132,36 @@ type BoxFut = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
 /// Responds to requests addressed to `/shout` by relaying the message within
 /// request body to OneSignal for broadcast.
 fn shout(req: Request<Body>) -> BoxFut {
-    let mut response = Response::new(Body::empty());
+    let mut response_out = Response::new(Body::empty());
 
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/") => {
-            *response.body_mut() = Body::from("Try POSTing data to /shout");
-            Box::new(future::ok(response))
+            *response_out.body_mut() = Body::from("Try POSTing data to /shout");
+            Box::new(future::ok(response_out))
 
         },
         (&Method::POST, "/shout") => {
-            *response.status_mut() = StatusCode::OK;
+            *response_out.status_mut() = StatusCode::OK;
             let message_chunks = req.into_body().collect();
 
-            let send = message_chunks.and_then(|message_chunks| {
+            let actions = message_chunks.and_then(|message_chunks| {
                 let message_bytes: Vec<u8> = message_chunks.into_iter().flat_map(|c| c.into_bytes()).collect();
                 let message: Message = serde_json::from_slice(&message_bytes).unwrap();
 
-                let body = RequestBody {
-                    app_id: &CONFIG.app_id,
-                    contents: RequestBodyContents {
-                        en: &message.message,
-                    },
-                    included_segments: "[All]",
+                let body = {
+                    let rb = RequestBody {
+                        app_id: &CONFIG.app_id,
+                        contents: RequestBodyContents {
+                            en: &message.message,
+                        },
+                        // included_segments: "[All]",
+                        included_segments: &["All"],
+                    };
+                    Body::from(serde_json::to_string(&rb).unwrap())
                 };
 
                 let uri: hyper::Uri = ONESIGNAL_API_URI.parse().unwrap();
-                let mut req = Request::new(Body::from(serde_json::to_string(&body).unwrap()));
+                let mut req = Request::new(body);
                 *req.method_mut() = Method::POST;
                 *req.uri_mut() = uri.clone();
                 req.headers_mut().insert("content-type", HeaderValue::from_str("application/json").unwrap());
@@ -174,26 +177,28 @@ fn shout(req: Request<Body>) -> BoxFut {
                 let client = Client::builder()
                     .build::<_, hyper::Body>(https);
 
-                info!("\nMessage: {}", message.message);
+                info!("Message: {}", message.message);
 
                 client
                     .request(req)
-                    .and_then(|res| {
-                        info!("Response: {}", res.status());
-                        // info!("Headers: {:#?}", res.headers());
+                    .and_then(move |response_in| {
+                        info!("Response: {}", response_in.status());
+                        trace!("Headers: {:#?}", response_in.headers());
 
-                        res.into_body().for_each(|chunk| {
-                            io::stdout().write_all(&chunk)
-                                .map_err(|e| panic!("Example expects stdout is open, error: {}", e))
+                        response_in.into_body().concat2().and_then(|body_in| {
+                            let body_bytes = body_in.into_bytes();
+                            info!("Incoming response: {}",  String::from_utf8_lossy(&body_bytes));
+                            *response_out.body_mut() = Body::from(body_bytes);
+                            future::ok(response_out)
                         })
                     })
             });
 
-            Box::new(send.join(future::ok(response)).map(|(_, r)| r))
+            Box::new(actions)
         },
         _ => {
-            *response.status_mut() = StatusCode::NOT_FOUND;
-            Box::new(future::ok(response))
+            *response_out.status_mut() = StatusCode::NOT_FOUND;
+            Box::new(future::ok(response_out))
         },
     }
 }
