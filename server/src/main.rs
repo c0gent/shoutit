@@ -39,6 +39,18 @@ struct Message {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+struct RequestBodyContents<'r> {
+    en: &'r str,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestBody<'r> {
+    app_id: &'r str,
+    contents: RequestBodyContents<'r>,
+    included_segments: &'r str,
+}
+
 
 fn parse_config() -> Config {
     let mut config_string = String::new();
@@ -98,12 +110,16 @@ fn shout(req: Request<Body>) -> BoxFut {
                 let message_bytes: Vec<u8> = message_chunks.into_iter().flat_map(|c| c.into_bytes()).collect();
                 let message: Message = serde_json::from_slice(&message_bytes).unwrap();
 
-                let json = format!("{{\"app_id\": \"{}\", \
-                    \"contents\": {{\"en\": \"{}\"}}, \
-                    \"included_segments\": [\"All\"]}}", CONFIG.app_id, message.message);
+                let body = RequestBody {
+                    app_id: &CONFIG.app_id,
+                    contents: RequestBodyContents {
+                        en: &message.message,
+                    },
+                    included_segments: "[All]",
+                };
 
                 let uri: hyper::Uri = "https://onesignal.com/api/v1/notifications".parse().unwrap();
-                let mut req = Request::new(Body::from(json));
+                let mut req = Request::new(Body::from(serde_json::to_string(&body).unwrap()));
                 *req.method_mut() = Method::POST;
                 *req.uri_mut() = uri.clone();
                 req.headers_mut().insert("content-type", HeaderValue::from_str("application/json").unwrap());
