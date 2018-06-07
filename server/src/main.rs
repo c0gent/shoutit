@@ -16,6 +16,8 @@ extern crate serde_derive;
 #[macro_use]
 extern crate lazy_static;
 extern crate serde_json;
+extern crate pretty_env_logger;
+#[macro_use] extern crate log;
 
 use std::fs::{OpenOptions, File, DirBuilder};
 use std::str;
@@ -26,6 +28,9 @@ use hyper::{header::HeaderValue, Client, Method, Request, Body,
     Response, Server, StatusCode, };
 use hyper::rt::{Future, Stream};
 use hyper_tls::HttpsConnector;
+
+
+static ONESIGNAL_API_URI: &str = "https://onesignal.com/api/v1/notifications";
 
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +57,11 @@ struct RequestBody<'r> {
 }
 
 
+/// Parses or creates a configuration file at `$HOME/.cogciprocate`.
+///
+/// TODO:
+/// * Error handling (call this function directly from main instead and handle errors there)
+/// * Add keys and dummy values when file is first created as a convenience.
 fn parse_config() -> Config {
     let mut config_string = String::new();
     let mut config_dir_path = ::std::env::home_dir().expect("Unable to determine user home directory.");
@@ -60,7 +70,7 @@ fn parse_config() -> Config {
     let mut config_file_path = config_dir_path.clone();
     config_file_path.push("shoutit.toml");
 
-    println!("{}", config_file_path.to_str().unwrap());
+    info!("Loading config from: '{}'", config_file_path.to_str().unwrap());
 
     let mut file = match File::open(&config_file_path) {
         Ok(f) => f,
@@ -118,7 +128,7 @@ fn shout(req: Request<Body>) -> BoxFut {
                     included_segments: "[All]",
                 };
 
-                let uri: hyper::Uri = "https://onesignal.com/api/v1/notifications".parse().unwrap();
+                let uri: hyper::Uri = ONESIGNAL_API_URI.parse().unwrap();
                 let mut req = Request::new(Body::from(serde_json::to_string(&body).unwrap()));
                 *req.method_mut() = Method::POST;
                 *req.uri_mut() = uri.clone();
@@ -135,13 +145,13 @@ fn shout(req: Request<Body>) -> BoxFut {
                 let client = Client::builder()
                     .build::<_, hyper::Body>(https);
 
-                println!("\nMessage: {}", message.message);
+                info!("\nMessage: {}", message.message);
 
                 client
                     .request(req)
                     .and_then(|res| {
-                        println!("Response: {}", res.status());
-                        // println!("Headers: {:#?}", res.headers());
+                        info!("Response: {}", res.status());
+                        // info!("Headers: {:#?}", res.headers());
 
                         res.into_body().for_each(|chunk| {
                             io::stdout().write_all(&chunk)
@@ -161,19 +171,20 @@ fn shout(req: Request<Body>) -> BoxFut {
 
 
 fn main() {
-    println!("ShoutIt server started.");
+    pretty_env_logger::init();
+    info!("ShoutIt server started.");
 
     let addr = ([10, 0, 0, 101], 8080).into();
 
     let server = Server::bind(&addr)
         .serve(|| service_fn(shout))
-        .map_err(|e| eprintln!("Server error: {}", e)); 
+        .map_err(|e| error!("Server error: {}", e)); 
 
-    println!("Listening on http://{}", addr);
+    info!("Listening on http://{}", addr);
     
     hyper::rt::run(server);
 
-    println!("ShoutIt server shutting down.");
+    info!("ShoutIt server shutting down.");
 }
 
 
