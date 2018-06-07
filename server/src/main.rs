@@ -13,9 +13,11 @@ extern crate hyper_tls;
 extern crate toml;
 #[macro_use]
 extern crate serde_derive;
+extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
-extern crate serde_json;
+#[macro_use]
+extern crate failure;
 extern crate pretty_env_logger;
 #[macro_use] extern crate log;
 
@@ -33,22 +35,26 @@ use hyper_tls::HttpsConnector;
 static ONESIGNAL_API_URI: &str = "https://onesignal.com/api/v1/notifications";
 
 
-#[derive(Debug, Deserialize)]
+/// Configuration from toml.
+#[derive(Debug, Serialize, Deserialize)]
 struct Config {
     app_id: String,
     rest_api_key: String,
 }
 
+/// Incoming request message.
 #[derive(Debug, Deserialize)]
 struct Message {
     message: String,
 }
 
+/// OneSignal REST API outgoing request body message contents.
 #[derive(Debug, Serialize)]
 struct RequestBodyContents<'r> {
     en: &'r str,
 }
 
+/// OneSignal REST API outgoing request body.
 #[derive(Debug, Serialize)]
 struct RequestBody<'r> {
     app_id: &'r str,
@@ -56,34 +62,57 @@ struct RequestBody<'r> {
     included_segments: &'r str,
 }
 
+/// Configuration errors.
+#[derive(Fail)]
+enum ConfigError {
+    #[fail(display = "Unable to determine user home directory.")]
+    NoHomeDir,
+    #[fail(display = "Unable to convert path to a string.")]
+    PathConversion,
+    #[fail(display = "Error creating configuration directory: {}", _0)]
+    CreateDir(io::Error),
+    #[fail(display = "Error creating configuration file: {}", _0)]
+    CreateFile(io::Error),
+    #[fail(display = "Error reading configuration file: {}", _0)]
+    ReadFile(io::Error),
+}
+
+impl std::fmt::Debug for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+
 
 /// Parses or creates a configuration file at `$HOME/.cogciprocate`.
 ///
 /// TODO:
 /// * Error handling (call this function directly from main instead and handle errors there)
 /// * Add keys and dummy values when file is first created as a convenience.
-fn parse_config() -> Config {
+fn parse_config() -> Result<Config, ConfigError> {
     let mut config_string = String::new();
-    let mut config_dir_path = ::std::env::home_dir().expect("Unable to determine user home directory.");
+    let mut config_dir_path = ::std::env::home_dir().ok_or(ConfigError::NoHomeDir)?;
     config_dir_path.push(".cogciprocate/");
 
     let mut config_file_path = config_dir_path.clone();
     config_file_path.push("shoutit.toml");
 
-    info!("Loading config from: '{}'", config_file_path.to_str().unwrap());
+    info!("Loading config from: '{}'", config_file_path.to_str().ok_or(ConfigError::PathConversion)?);
 
     let mut file = match File::open(&config_file_path) {
         Ok(f) => f,
-        Err(err) => {
+        Err(_err) => {
             DirBuilder::new()
                 .recursive(true)
-                .create(config_dir_path.clone()).unwrap();
-            let _ = OpenOptions::new().write(true).create(true).open(&config_file_path).unwrap();
-            File::open(&config_file_path).expect(&format!("Error opening ShoutIt config file: {}", err))
+                .create(config_dir_path.clone()).map_err(|err| ConfigError::CreateDir(err))?;
+            OpenOptions::new().read(true).write(true).create(true).open(&config_file_path)
+                .map_err(|err| ConfigError::CreateFile(err))?
+            // TODO: Populate config file with placeholder values after creation.
         },        
     };
 
-    file.read_to_string(&mut config_string).unwrap();
+    file.read_to_string(&mut config_string).map_err(|err| ConfigError::ReadFile(err))?;
 
     let config = match toml::from_str(&config_string) {
         Ok(c) => c,
@@ -91,11 +120,11 @@ fn parse_config() -> Config {
             'rest_api_key = YOUR_REST_API_KEY' lines to '{}'.", err, config_file_path.to_str().unwrap()),
     };
 
-    config
+    Ok(config)
 }
 
 lazy_static! {
-    static ref CONFIG: Config = parse_config();
+    static ref CONFIG: Config = parse_config().unwrap();
 }
 
 type BoxFut = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
@@ -172,7 +201,9 @@ fn shout(req: Request<Body>) -> BoxFut {
 
 fn main() {
     pretty_env_logger::init();
-    info!("ShoutIt server started.");
+    lazy_static::initialize(&CONFIG);
+
+    info!("ShoutIt server starting...");
 
     let addr = ([10, 0, 0, 101], 8080).into();
 
@@ -184,7 +215,7 @@ fn main() {
     
     hyper::rt::run(server);
 
-    info!("ShoutIt server shutting down.");
+    info!("ShoutIt server shut down.");
 }
 
 
