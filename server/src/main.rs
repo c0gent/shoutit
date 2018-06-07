@@ -23,7 +23,8 @@ extern crate pretty_env_logger;
 
 use std::fs::{OpenOptions, File, DirBuilder};
 use std::str;
-use std::io::{self, Write, Read};
+use std::io::{self, Read};
+use failure::{Context};
 use futures::future;
 use hyper::service::service_fn;
 use hyper::{header::HeaderValue, Client, Method, Request, Body,
@@ -33,6 +34,7 @@ use hyper_tls::HttpsConnector;
 
 
 static ONESIGNAL_API_URI: &str = "https://onesignal.com/api/v1/notifications";
+static INCLUDED_SEGMENTS: &[&str] = &["All"];
 
 
 /// Configuration from toml.
@@ -42,29 +44,8 @@ struct Config {
     rest_api_key: String,
 }
 
-/// Incoming request message.
-#[derive(Debug, Deserialize)]
-struct Message {
-    message: String,
-}
-
-/// OneSignal REST API outgoing request body message contents.
-#[derive(Debug, Serialize)]
-struct RequestBodyContents<'r> {
-    en: &'r str,
-}
-
-/// OneSignal REST API outgoing request body.
-#[derive(Debug, Serialize)]
-struct RequestBody<'r> {
-    app_id: &'r str,
-    contents: RequestBodyContents<'r>,
-    // included_segments: &'r str,
-    included_segments: &'r [&'r str],
-}
-
 /// Configuration errors.
-#[derive(Fail)]
+#[derive(Debug, Fail)]
 enum ConfigError {
     #[fail(display = "Unable to determine user home directory.")]
     NoHomeDir,
@@ -76,13 +57,12 @@ enum ConfigError {
     CreateFile(io::Error),
     #[fail(display = "Error reading configuration file: {}", _0)]
     ReadFile(io::Error),
+    #[fail(display = "Invalid App ID in configuration file: {}", _0)]
+    InvalidAppId(hyper::header::InvalidHeaderValue),
+    #[fail(display = "Invalid REST API key in configuration file: {}", _0)]
+    InvalidRestApiKey(hyper::header::InvalidHeaderValue),
 }
 
-impl std::fmt::Debug for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
 
 /// Parses or creates a configuration file at `$HOME/.cogciprocate`.
 ///
@@ -113,20 +93,103 @@ fn parse_config() -> Result<Config, ConfigError> {
 
     file.read_to_string(&mut config_string).map_err(|err| ConfigError::ReadFile(err))?;
 
-    let config = match toml::from_str(&config_string) {
+    let config = match toml::from_str::<Config>(&config_string) {
         Ok(c) => c,
         Err(err) => panic!("Error parsing ShoutIt config file: {}. Please add 'app_id = YOUR_APP_ID' and \
             'rest_api_key = YOUR_REST_API_KEY' lines to '{}'.", err, config_file_path.to_str().unwrap()),
     };
 
+    // Ensure configuration file values are valid:
+    HeaderValue::from_str(&config.app_id).map_err(|err| ConfigError::InvalidAppId(err))?;
+    HeaderValue::from_str(&config.rest_api_key).map_err(|err| ConfigError::InvalidRestApiKey(err))?;
+
     Ok(config)
 }
 
+
 lazy_static! {
-    static ref CONFIG: Config = parse_config().unwrap();
+    // Print with `Display` rather than `Debug` format:
+    static ref CONFIG: Config = parse_config().unwrap_or_else(|err| panic!("{}", err));
 }
 
-type BoxFut = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
+
+/// Incoming request message.
+#[derive(Debug, Deserialize)]
+struct Message {
+    message: String,
+}
+
+/// OneSignal REST API outgoing request body message contents.
+#[derive(Debug, Serialize)]
+struct RequestBodyContents<'r> {
+    en: &'r str,
+}
+
+/// OneSignal REST API outgoing request body.
+#[derive(Debug, Serialize)]
+struct RequestBody<'r> {
+    app_id: &'r str,
+    contents: RequestBodyContents<'r>,
+    included_segments: &'r [&'r str],
+}
+
+/// Server errors.
+///
+/// This is unweildy because of the weirdly stringent requirements on error 
+/// types that non-custom servers have (when using `hyper::server::Builder::build`). 
+/// This will probably be alleviated when futures 0.3 is integrated into hyper and 
+/// error handling changes.
+///
+/// Using a custom server would also eliminate the problem (TODO). 
+#[derive(Debug, Fail)]
+enum ServerErrorKind {
+    #[fail(display = "{}", _0)]
+    Hyper(hyper::Error),
+    #[fail(display = "{}", _0)]
+    SerdeJson(serde_json::Error),
+}
+
+#[derive(Debug)]
+struct ServerError {
+    inner: Context<ServerErrorKind>,
+}
+
+impl std::error::Error for ServerError {    
+    fn description(&self) -> &str {
+        match self.inner.get_context() {
+            ServerErrorKind::Hyper(err) => err.description(),
+            ServerErrorKind::SerdeJson(err) => err.description(),
+        }
+    }
+
+    fn cause(&self) -> Option<&std::error::Error> {
+        Some(&*self as &std::error::Error)
+    }
+}
+
+impl std::fmt::Display for ServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, f)
+    }
+}
+
+impl From<hyper::Error> for ServerError {
+    fn from(err: hyper::Error) -> ServerError {
+        ServerError { inner: Context::new(ServerErrorKind::Hyper(err)) }
+    }
+}
+
+impl From<serde_json::Error> for ServerError {
+    fn from(err: serde_json::Error) -> ServerError {
+        ServerError { inner: Context::new(ServerErrorKind::SerdeJson(err)) }
+    }
+}
+
+unsafe impl Send for ServerError {}
+unsafe impl Sync for ServerError {}
+
+
+type BoxFut = Box<Future<Item = Response<Body>, Error = ServerError> + Send>;
 
 
 /// Responds to requests addressed to `/shout` by relaying the message within
@@ -142,24 +205,30 @@ fn shout(req: Request<Body>) -> BoxFut {
         },
         (&Method::POST, "/shout") => {
             *response_out.status_mut() = StatusCode::OK;
-            let message_chunks = req.into_body().collect();
+            let message_chunks = req.into_body().collect().map_err(|err| ServerError::from(err));
 
             let actions = message_chunks.and_then(|message_chunks| {
                 let message_bytes: Vec<u8> = message_chunks.into_iter().flat_map(|c| c.into_bytes()).collect();
-                let message: Message = serde_json::from_slice(&message_bytes).unwrap();
-
-                let body = {
+                match serde_json::from_slice::<Message>(&message_bytes) {
+                    Ok(b) => future::ok(b),
+                    Err(err) => future::err(ServerError::from(err)),
+                }
+            }).and_then(|message| {
+                let b = {
                     let rb = RequestBody {
                         app_id: &CONFIG.app_id,
                         contents: RequestBodyContents {
                             en: &message.message,
                         },
-                        // included_segments: "[All]",
-                        included_segments: &["All"],
+                        included_segments: INCLUDED_SEGMENTS,
                     };
-                    Body::from(serde_json::to_string(&rb).unwrap())
+                    match serde_json::to_string(&rb) {
+                        Ok(rb_str) => Body::from(rb_str),
+                        Err(err) => return future::err(ServerError::from(err)),
+                    }
                 };
-
+                future::ok((message, b))
+            }).and_then(|(message, body)| {
                 let uri: hyper::Uri = ONESIGNAL_API_URI.parse().unwrap();
                 let mut req = Request::new(body);
                 *req.method_mut() = Method::POST;
@@ -192,6 +261,7 @@ fn shout(req: Request<Body>) -> BoxFut {
                             future::ok(response_out)
                         })
                     })
+                    .map_err(|err| ServerError::from(err))
             });
 
             Box::new(actions)
@@ -215,6 +285,7 @@ fn main() {
     let server = Server::bind(&addr)
         .serve(|| service_fn(shout))
         .map_err(|e| error!("Server error: {}", e)); 
+        
 
     info!("Listening on http://{}", addr);
     
