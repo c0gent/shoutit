@@ -1,9 +1,13 @@
 //! A message relay server using OneSignal push services.
-
-#![allow(unused_imports, dead_code)]
+//!
+//! 
+//
+// TODO: 
+// * Proper error handling
+// * Create `Client` separately and use a channel to send messages from server
+// * Store server bind IP in config file
 
 extern crate futures;
-extern crate tokio;
 extern crate hyper;
 extern crate hyper_tls;
 extern crate toml;
@@ -15,15 +19,13 @@ extern crate serde_json;
 
 use std::fs::{OpenOptions, File, DirBuilder};
 use std::str;
-use std::io::{self, Write, Read, Error as IoError};
-use futures::{future, IntoFuture};
-use tokio::reactor::Reactor;
+use std::io::{self, Write, Read};
+use futures::future;
 use hyper::service::service_fn;
-use hyper::{error::Error as HyperError, header::HeaderValue, Client, Method, Request, Body,
-    Response, Server, StatusCode, service::Service, body::Payload};
-use hyper::rt::{self, Future, Stream};
+use hyper::{header::HeaderValue, Client, Method, Request, Body,
+    Response, Server, StatusCode, };
+use hyper::rt::{Future, Stream};
 use hyper_tls::HttpsConnector;
-use toml::Value;
 
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +79,8 @@ lazy_static! {
 type BoxFut = Box<Future<Item = Response<Body>, Error = hyper::Error> + Send>;
 
 
+/// Responds to requests addressed to `/shout` by relaying the message within
+/// request body to OneSignal for broadcast.
 fn shout(req: Request<Body>) -> BoxFut {
     let mut response = Response::new(Body::empty());
 
@@ -92,8 +96,6 @@ fn shout(req: Request<Body>) -> BoxFut {
 
             let send = message_chunks.and_then(|message_chunks| {
                 let message_bytes: Vec<u8> = message_chunks.into_iter().flat_map(|c| c.into_bytes()).collect();
-                // let message = String::from_utf8(message_bytes).unwrap();
-
                 let message: Message = serde_json::from_slice(&message_bytes).unwrap();
 
                 let json = format!("{{\"app_id\": \"{}\", \
@@ -106,8 +108,13 @@ fn shout(req: Request<Body>) -> BoxFut {
                 *req.uri_mut() = uri.clone();
                 req.headers_mut().insert("content-type", HeaderValue::from_str("application/json").unwrap());
                 req.headers_mut().insert("charset", HeaderValue::from_str("utf-8").unwrap());
-                req.headers_mut().insert("Authorization", HeaderValue::from_str(&format!("Basic {}", CONFIG.rest_api_key)).unwrap());
+                req.headers_mut().insert("Authorization", HeaderValue::from_str(
+                    &format!("Basic {}", CONFIG.rest_api_key)).unwrap());
 
+                // TODO: Create a custom service, `ShoutService`, containing a
+                // tx to a separate struct containing a client and a rx. This
+                // way the client does not need to be recreated for every
+                // message.
                 let https = HttpsConnector::new(4).expect("TLS initialization failed");
                 let client = Client::builder()
                     .build::<_, hyper::Body>(https);

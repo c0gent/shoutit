@@ -25,8 +25,8 @@ parsed by the server then relayed asynchronously to the OneSignal REST API.
 From there, OneSignal's delivery network will push the message out to all
 users with the client installed.
 
-The client uses [Volley](https://github.com/google/volley) and the [OneSignal
-Android SDK](https://github.com/OneSignal/OneSignal-Android-SDK).
+The android client uses [Volley](https://github.com/google/volley) and the
+[OneSignal Android SDK](https://github.com/OneSignal/OneSignal-Android-SDK).
 
 The server uses [hyper](https://github.com/hyperium/hyper) to send messages
 asynchronously using the [futures](https://github.com/rust-lang-nursery/futures-rs) API.
@@ -37,3 +37,8 @@ asynchronously using the [futures](https://github.com/rust-lang-nursery/futures-
 This is an experimental for-fun project but please feel free to report any
 problems or ask questions on the
 [Issues](https://github.com/c0gent/shoutit/issues) page.
+
+
+##### License
+
+Licensed under the MIT license ([LICENSE](LICENSE) or http://opensource.org/licenses/MIT).
