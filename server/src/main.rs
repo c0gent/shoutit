@@ -2,14 +2,12 @@
 //!
 //! 
 //
-// TODO: 
-// * Proper error handling
-// * Create `Client` separately and use a channel to send messages from server
 // * Store server bind IP in config file
 
 extern crate futures;
 extern crate hyper;
 extern crate hyper_tls;
+extern crate tokio_core;
 extern crate toml;
 #[macro_use]
 extern crate serde_derive;
@@ -24,18 +22,19 @@ extern crate pretty_env_logger;
 use std::fs::{OpenOptions, File, DirBuilder};
 use std::str;
 use std::io::{self, Read};
+use std::thread;
+use std::net::SocketAddr;
 use failure::{Context};
 use futures::future;
-use hyper::service::service_fn;
 use hyper::{header::HeaderValue, Client, Method, Request, Body,
-    Response, Server, StatusCode, };
+    Response, StatusCode, service::Service, server::conn::Http};
 use hyper::rt::{Future, Stream};
 use hyper_tls::HttpsConnector;
+use tokio_core::{reactor::Core, net::TcpListener};
 
 
 static ONESIGNAL_API_URI: &str = "https://onesignal.com/api/v1/notifications";
 static INCLUDED_SEGMENTS: &[&str] = &["All"];
-
 
 /// Configuration from toml.
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,8 +62,7 @@ enum ConfigError {
     InvalidRestApiKey(hyper::header::InvalidHeaderValue),
 }
 
-
-/// Parses or creates a configuration file at `$HOME/.cogciprocate`.
+/// Parses or creates the configuration file, `$HOME/.cogciprocate/shoutit.toml`.
 ///
 /// TODO:
 /// * Error handling (call this function directly from main instead and handle errors there)
@@ -95,6 +93,7 @@ fn parse_config() -> Result<Config, ConfigError> {
 
     let config = match toml::from_str::<Config>(&config_string) {
         Ok(c) => c,
+        // TODO: Populate config file with placeholder values after creation.
         Err(err) => panic!("Error parsing ShoutIt config file: {}. Please add 'app_id = YOUR_APP_ID' and \
             'rest_api_key = YOUR_REST_API_KEY' lines to '{}'.", err, config_file_path.to_str().unwrap()),
     };
@@ -106,9 +105,8 @@ fn parse_config() -> Result<Config, ConfigError> {
     Ok(config)
 }
 
-
 lazy_static! {
-    // Print with `Display` rather than `Debug` format:
+    // Print error with `Display` rather than `Debug` format:
     static ref CONFIG: Config = parse_config().unwrap_or_else(|err| panic!("{}", err));
 }
 
@@ -134,19 +132,23 @@ struct RequestBody<'r> {
 }
 
 /// Server errors.
-///
-/// This is unweildy because of the weirdly stringent requirements on error 
-/// types that non-custom servers have (when using `hyper::server::Builder::build`). 
-/// This will probably be alleviated when futures 0.3 is integrated into hyper and 
-/// error handling changes.
-///
-/// Using a custom server would also eliminate the problem (TODO). 
+//
+// This is unweildy because of the stringent requirements on error types. 
+//
+// Using a `NewService` with `Http::serve_addr` or `Http::serve_addr_handle` 
+// may alleviate this (TODO).
 #[derive(Debug, Fail)]
 enum ServerErrorKind {
     #[fail(display = "{}", _0)]
     Hyper(hyper::Error),
     #[fail(display = "{}", _0)]
     SerdeJson(serde_json::Error),
+    #[fail(display = "Failed to bind server to address '{}': {}", _0, _1)]
+    BindAddress(SocketAddr, io::Error),
+    #[fail(display = "The server has shut down unexpectedly")]
+    UnexpectedEnd,
+    #[fail(display = "Thread spawn error: {}", _0)]
+    ThreadSpawnError(io::Error),
 }
 
 #[derive(Debug)]
@@ -154,11 +156,32 @@ struct ServerError {
     inner: Context<ServerErrorKind>,
 }
 
+impl ServerError {
+    fn new(kind: ServerErrorKind) -> ServerError {
+        ServerError { inner: Context::new(kind) }
+    }
+
+    fn bind_address(addr: SocketAddr, err: io::Error) -> ServerError {
+        ServerError::new(ServerErrorKind::BindAddress(addr, err))
+    }
+
+    fn unexpected_end() -> ServerError {
+        ServerError::new(ServerErrorKind::UnexpectedEnd)
+    }
+
+    fn thread_spawn_error(err: io::Error) -> ServerError {
+        ServerError::new(ServerErrorKind::ThreadSpawnError(err))
+    }
+}
+
 impl std::error::Error for ServerError {    
     fn description(&self) -> &str {
         match self.inner.get_context() {
             ServerErrorKind::Hyper(err) => err.description(),
             ServerErrorKind::SerdeJson(err) => err.description(),
+            ServerErrorKind::BindAddress(_, err) => err.description(),
+            ServerErrorKind::UnexpectedEnd => "The server has shut down unexpectedly",
+            ServerErrorKind::ThreadSpawnError(err) => err.description(),
         }
     }
 
@@ -175,13 +198,13 @@ impl std::fmt::Display for ServerError {
 
 impl From<hyper::Error> for ServerError {
     fn from(err: hyper::Error) -> ServerError {
-        ServerError { inner: Context::new(ServerErrorKind::Hyper(err)) }
+        ServerError::new(ServerErrorKind::Hyper(err))
     }
 }
 
 impl From<serde_json::Error> for ServerError {
     fn from(err: serde_json::Error) -> ServerError {
-        ServerError { inner: Context::new(ServerErrorKind::SerdeJson(err)) }
+        ServerError::new(ServerErrorKind::SerdeJson(err))
     }
 }
 
@@ -189,87 +212,125 @@ unsafe impl Send for ServerError {}
 unsafe impl Sync for ServerError {}
 
 
-type BoxFut = Box<Future<Item = Response<Body>, Error = ServerError> + Send>;
+/// The ShoutIt server.
+#[derive(Clone, Debug)]
+struct ShoutServer {
+    client: Client<HttpsConnector<hyper::client::HttpConnector>, Body>,
+}
 
+impl ShoutServer {
+    /// Returns a new `ShoutServer`.
+    fn new() -> ShoutServer {
+        let https = HttpsConnector::new(4).expect("TLS initialization failed");
+        let client = Client::builder().build(https);
+        ShoutServer { client }
+    }
 
-/// Responds to requests addressed to `/shout` by relaying the message within
-/// request body to OneSignal for broadcast.
-fn shout(req: Request<Body>) -> BoxFut {
-    let mut response_out = Response::new(Body::empty());
+    /// Starts the server in a new thread and returns the thread handle.
+    fn run(self) -> Result<thread::JoinHandle<Result<(), ServerError>>, ServerError> {
+        thread::Builder::new()
+            .name("shout_server".to_owned())
+            .spawn(move || -> Result<(), ServerError> {  
+                let address = ([10, 0, 0, 101], 8080).into();
+                let mut core = Core::new().unwrap();
+                let handle = core.handle();
+    
+                let http = Http::new();
 
-    match (req.method(), req.uri().path()) {
-        (&Method::GET, "/") => {
-            *response_out.body_mut() = Body::from("Try POSTing data to /shout");
-            Box::new(future::ok(response_out))
+                let listener = TcpListener::bind(&address, &handle)
+                    .map_err(|err| ServerError::bind_address(address.clone(), err))?;
 
-        },
-        (&Method::POST, "/shout") => {
-            *response_out.status_mut() = StatusCode::OK;
-            let message_chunks = req.into_body().collect().map_err(|err| ServerError::from(err));
+                let server = listener.incoming().for_each(move |(socket, _source_address)| {
+                    handle.spawn(
+                        http.serve_connection(socket, self.clone())
+                            .map(|_| ())
+                            .map_err(|err| error!("{}", err))
+                    );
+                    Ok(())
+                });
 
-            let actions = message_chunks.and_then(|message_chunks| {
-                let message_bytes: Vec<u8> = message_chunks.into_iter().flat_map(|c| c.into_bytes()).collect();
-                match serde_json::from_slice::<Message>(&message_bytes) {
-                    Ok(b) => future::ok(b),
-                    Err(err) => future::err(ServerError::from(err)),
-                }
-            }).and_then(|message| {
-                let b = {
-                    let rb = RequestBody {
-                        app_id: &CONFIG.app_id,
-                        contents: RequestBodyContents {
-                            en: &message.message,
-                        },
-                        included_segments: INCLUDED_SEGMENTS,
-                    };
-                    match serde_json::to_string(&rb) {
-                        Ok(rb_str) => Body::from(rb_str),
-                        Err(err) => return future::err(ServerError::from(err)),
+                info!("Listening on http://{}", address);
+                
+                core.run(server).unwrap();
+                Err(ServerError::unexpected_end())
+            }).map_err(|err| ServerError::thread_spawn_error(err))
+    }    
+}
+
+impl Service for ShoutServer {
+    type ReqBody = Body;
+    type ResBody = Body;
+    type Error = ServerError;
+    type Future = Box<Future<Item = Response<Self::ResBody>, Error = Self::Error> + Send>;
+
+    fn call(&mut self, req: Request<Self::ReqBody>) -> Self::Future {
+        let mut response_out = Response::new(Body::empty());
+        let client = self.client.clone();
+
+        match (req.method(), req.uri().path()) {
+            (&Method::GET, "/") => {
+                *response_out.body_mut() = Body::from("Try POSTing data to /shout");
+                Box::new(future::ok(response_out))
+
+            },
+            (&Method::POST, "/shout") => {
+                *response_out.status_mut() = StatusCode::OK;
+                let message_chunks = req.into_body().collect().map_err(|err| ServerError::from(err));
+
+                let actions = message_chunks.and_then(|message_chunks| {
+                    let message_bytes: Vec<u8> = message_chunks.into_iter().flat_map(|c| c.into_bytes()).collect();
+                    match serde_json::from_slice::<Message>(&message_bytes) {
+                        Ok(b) => future::ok(b),
+                        Err(err) => future::err(ServerError::from(err)),
                     }
-                };
-                future::ok((message, b))
-            }).and_then(|(message, body)| {
-                let uri: hyper::Uri = ONESIGNAL_API_URI.parse().unwrap();
-                let mut req = Request::new(body);
-                *req.method_mut() = Method::POST;
-                *req.uri_mut() = uri.clone();
-                req.headers_mut().insert("content-type", HeaderValue::from_str("application/json").unwrap());
-                req.headers_mut().insert("charset", HeaderValue::from_str("utf-8").unwrap());
-                req.headers_mut().insert("Authorization", HeaderValue::from_str(
-                    &format!("Basic {}", CONFIG.rest_api_key)).unwrap());
+                }).and_then(|message| {
+                    let b = {
+                        let rb = RequestBody {
+                            app_id: &CONFIG.app_id,
+                            contents: RequestBodyContents {
+                                en: &message.message,
+                            },
+                            included_segments: INCLUDED_SEGMENTS,
+                        };
+                        match serde_json::to_string(&rb) {
+                            Ok(rb_str) => Body::from(rb_str),
+                            Err(err) => return future::err(ServerError::from(err)),
+                        }
+                    };
+                    future::ok((message, b))
+                }).and_then(move |(message, body)| {
+                    let uri: hyper::Uri = ONESIGNAL_API_URI.parse().unwrap();
+                    let mut req = Request::new(body);
+                    *req.method_mut() = Method::POST;
+                    *req.uri_mut() = uri.clone();
+                    req.headers_mut().insert("content-type", HeaderValue::from_str("application/json").unwrap());
+                    req.headers_mut().insert("charset", HeaderValue::from_str("utf-8").unwrap());
+                    req.headers_mut().insert("Authorization", HeaderValue::from_str(
+                        &format!("Basic {}", CONFIG.rest_api_key)).unwrap());
 
-                // TODO: Create a custom service, `ShoutService`, containing a
-                // tx to a separate struct containing a client and a rx. This
-                // way the client does not need to be recreated for every
-                // message.
-                let https = HttpsConnector::new(4).expect("TLS initialization failed");
-                let client = Client::builder()
-                    .build::<_, hyper::Body>(https);
+                    info!("Message: {}", message.message);
 
-                info!("Message: {}", message.message);
+                    client.request(req).and_then(move |response_in| {
+                            info!("Response: {}", response_in.status());
+                            trace!("Headers: {:#?}", response_in.headers());
 
-                client
-                    .request(req)
-                    .and_then(move |response_in| {
-                        info!("Response: {}", response_in.status());
-                        trace!("Headers: {:#?}", response_in.headers());
-
-                        response_in.into_body().concat2().and_then(|body_in| {
-                            let body_bytes = body_in.into_bytes();
-                            info!("Incoming response: {}",  String::from_utf8_lossy(&body_bytes));
-                            *response_out.body_mut() = Body::from(body_bytes);
-                            future::ok(response_out)
+                            response_in.into_body().concat2().and_then(|body_in| {
+                                let body_bytes = body_in.into_bytes();
+                                info!("Incoming response: {}",  String::from_utf8_lossy(&body_bytes));
+                                *response_out.body_mut() = Body::from(body_bytes);
+                                future::ok(response_out)
+                            })
                         })
-                    })
-                    .map_err(|err| ServerError::from(err))
-            });
+                        .map_err(|err| ServerError::from(err))
+                });
 
-            Box::new(actions)
-        },
-        _ => {
-            *response_out.status_mut() = StatusCode::NOT_FOUND;
-            Box::new(future::ok(response_out))
-        },
+                Box::new(actions)
+            },
+            _ => {
+                *response_out.status_mut() = StatusCode::NOT_FOUND;
+                Box::new(future::ok(response_out))
+            },
+        }
     }
 }
 
@@ -280,18 +341,14 @@ fn main() {
 
     info!("ShoutIt server starting...");
 
-    let addr = ([10, 0, 0, 101], 8080).into();
+    let result = ShoutServer::new().run().and_then(|handle| {
+        handle.join().unwrap()
+    });
 
-    let server = Server::bind(&addr)
-        .serve(|| service_fn(shout))
-        .map_err(|e| error!("Server error: {}", e)); 
-        
-
-    info!("Listening on http://{}", addr);
-    
-    hyper::rt::run(server);
+    match result {
+        Ok(()) => (),
+        Err(err) => panic!("{}", err),
+    }
 
     info!("ShoutIt server shut down.");
 }
-
-
