@@ -27,6 +27,7 @@ public class MainActivity extends AppCompatActivity {
     public static final String EXTRA_MESSAGE = "com.cogciprocate.onesignalshoutit.MESSAGE";
     private RequestQueue mRequestQueue;
     private EditText editText;
+    private String messageText;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -35,6 +36,7 @@ public class MainActivity extends AppCompatActivity {
 
         mRequestQueue = Volley.newRequestQueue(this);
         editText = (EditText) findViewById(R.id.editText);
+        messageText = "";
     }
 
     public void sendMessage(View view) {
@@ -46,8 +48,10 @@ public class MainActivity extends AppCompatActivity {
         String url =  "http://cogciprocate.com:8080/shout";
 //        Toast.makeText(MainActivity.this, "Posting message...", Toast.LENGTH_SHORT).show();
         JSONObject jsonBody = new JSONObject();
+        messageText = editText.getText().toString();
+        editText.setText("");
         try {
-            jsonBody.put("message", editText.getText());
+            jsonBody.put("message", messageText);
         } catch (JSONException e) {
             e.printStackTrace();
         }
@@ -63,7 +67,7 @@ public class MainActivity extends AppCompatActivity {
 //                    } catch (JSONException e) {
 //                        e.printStackTrace();
 //                    }
-                    String msg = "\"" + editText.getText() + "\" has been shouted!";
+                    String msg = "\"" + messageText + "\" has been shouted!";
                     Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
 
                     String res = response.toString();

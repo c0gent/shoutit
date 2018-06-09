@@ -244,7 +244,7 @@ impl ShoutServer {
                     handle.spawn(
                         http.serve_connection(socket, self.clone())
                             .map(|_| ())
-                            .map_err(|err| error!("{}", err))
+                            .map_err(|err| error!("Server connection error: {}", err))
                     );
                     Ok(())
                 });
