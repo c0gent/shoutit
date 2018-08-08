@@ -49,7 +49,9 @@ public class MainActivity extends AppCompatActivity {
 //        Toast.makeText(MainActivity.this, "Posting message...", Toast.LENGTH_SHORT).show();
         JSONObject jsonBody = new JSONObject();
         messageText = editText.getText().toString();
+        if (messageText.isEmpty()) { return; }
         editText.setText("");
+
         try {
             jsonBody.put("message", messageText);
         } catch (JSONException e) {

@@ -232,6 +232,7 @@ impl ShoutServer {
             .name("shout_server".to_owned())
             .spawn(move || -> Result<(), ServerError> {  
                 let address = ([10, 0, 0, 101], 8080).into();
+                // let address = ([127, 0, 0, 1], 8080).into();
                 let mut core = Core::new().unwrap();
                 let handle = core.handle();
     
